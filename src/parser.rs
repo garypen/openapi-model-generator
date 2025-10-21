@@ -232,9 +232,7 @@ fn parse_schema_to_model_type(
                         let variants: Vec<String> = string_type
                             .enumeration
                             .iter()
-                            .filter_map(|value| {
-                                value.clone()
-                            })
+                            .filter_map(|value| value.clone())
                             .collect();
 
                         if !variants.is_empty() {

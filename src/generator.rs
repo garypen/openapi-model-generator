@@ -95,10 +95,7 @@ fn generate_model(model: &Model) -> Result<String> {
 
         // Only add serde rename if the Rust field name differs from the original field name
         if lowercased_name != field.name {
-            output.push_str(&format!(
-                "    #[serde(rename = \"{}\")]\n",
-                field.name
-            ));
+            output.push_str(&format!("    #[serde(rename = \"{}\")]\n", field.name));
         }
 
         if field.is_required && !field.is_nullable {
@@ -168,11 +165,7 @@ fn generate_union(union: &UnionModel) -> Result<String> {
     output.push_str(&format!("pub enum {} {{\n", union.name));
 
     for variant in &union.variants {
-            output.push_str(&format!(
-                "    {}({}),\n",
-                variant.name,
-                variant.name
-            ));
+        output.push_str(&format!("    {}({}),\n", variant.name, variant.name));
     }
 
     output.push_str("}\n");
@@ -205,10 +198,7 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
 
         // Only add serde rename if the Rust field name differs from the original field name
         if lowercased_name != field.name {
-            output.push_str(&format!(
-                "    #[serde(rename = \"{}\")]\n",
-                field.name
-            ));
+            output.push_str(&format!("    #[serde(rename = \"{}\")]\n", field.name));
         }
 
         if field.is_required && !field.is_nullable {
@@ -299,10 +289,7 @@ pub fn generate_rust_code(models: &[Model]) -> Result<String> {
 
             // Only add serde rename if the Rust field name differs from the original field name
             if lowercased_name != field.name {
-                code.push_str(&format!(
-                    "    #[serde(rename = \"{}\")]\n",
-                    field.name
-                ));
+                code.push_str(&format!("    #[serde(rename = \"{}\")]\n", field.name));
             }
 
             if field.is_required {
