@@ -15,6 +15,10 @@ A Rust library and CLI tool for generating Rust models from OpenAPI specificatio
   - UUID fields (`format: uuid` → `Uuid` type)
   - DateTime fields (`format: date-time` → `DateTime<Utc>` type)
   - Nested types and arrays with proper generic handling
+- **Custom Type Support**:
+  - `x-rust-type` extension - Replace generated models with custom Rust types (type aliases)
+  - Works with any schema type (object, enum, oneOf, etc.)
+- **Request Bodies Support**: Full parsing and model generation from `components.requestBodies`
 - **Smart Code Generation**:
   - Required vs optional field detection (`Option<T>` for nullable fields)
   - PascalCase naming for generated request/response models
@@ -115,6 +119,44 @@ pub struct User {
     pub is_active: Option<bool>,
 }
 ```
+
+### Using Custom Types with `x-rust-type`
+
+You can use the `x-rust-type` extension to replace generated models with your own custom types:
+
+```yaml
+components:
+  schemas:
+    User:
+      type: object
+      x-rust-type: crate::domain::User
+      description: "Custom domain user type"
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+    
+    Status:
+      type: string
+      enum: [active, inactive, pending]
+      x-rust-type: common::enums::Status
+```
+
+Generated Rust code:
+```rust
+/// Custom domain user type
+pub type User = crate::domain::User;
+
+/// Status
+pub type Status = common::enums::Status;
+```
+
+This allows you to:
+- Reuse existing domain models instead of generating duplicates
+- Integrate with types from other crates
+- Maintain a clean separation between API models and domain models
 
 ## Development
 

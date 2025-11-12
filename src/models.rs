@@ -6,6 +6,7 @@ pub enum ModelType {
     Union(UnionModel),             // oneOf/anyOf -> enum
     Composition(CompositionModel), // allOf
     Enum(EnumModel),               // enum values -> enum
+    TypeAlias(TypeAliasModel),     // x-rust-type -> type alias
 }
 
 impl ModelType {
@@ -15,6 +16,7 @@ impl ModelType {
             ModelType::Enum(e) => &e.name,
             ModelType::Union(u) => &u.name,
             ModelType::Composition(c) => &c.name,
+            ModelType::TypeAlias(t) => &t.name,
         }
     }
 }
@@ -80,5 +82,12 @@ pub struct ResponseModel {
 pub struct EnumModel {
     pub name: String,
     pub variants: Vec<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeAliasModel {
+    pub name: String,
+    pub target_type: String,
     pub description: Option<String>,
 }

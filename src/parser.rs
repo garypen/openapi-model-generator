@@ -1,7 +1,7 @@
 use crate::{
     models::{
         CompositionModel, EnumModel, Field, Model, ModelType, RequestModel, ResponseModel,
-        UnionModel, UnionType, UnionVariant,
+        TypeAliasModel, UnionModel, UnionType, UnionVariant,
     },
     Result,
 };
@@ -207,6 +207,17 @@ fn parse_schema_to_model_type(
     match schema {
         ReferenceOr::Reference { .. } => Ok(Vec::new()),
         ReferenceOr::Item(schema) => {
+            // Проверяем наличие x-rust-type - если есть, генерируем type alias
+            if let Some(rust_type) = schema.schema_data.extensions.get("x-rust-type") {
+                if let Some(type_str) = rust_type.as_str() {
+                    return Ok(vec![ModelType::TypeAlias(TypeAliasModel {
+                        name: to_pascal_case(name),
+                        target_type: type_str.to_string(),
+                        description: schema.schema_data.description.clone(),
+                    })]);
+                }
+            }
+
             match &schema.schema_kind {
                 // regular objects
                 SchemaKind::Type(Type::Object(obj)) => {
@@ -993,6 +1004,111 @@ mod tests {
             );
         } else {
             panic!("Expected Person to be a Composition");
+        }
+    }
+
+    #[test]
+    fn test_x_rust_type_generates_type_alias() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "User": {
+                        "type": "object",
+                        "x-rust-type": "crate::domain::User",
+                        "description": "Custom domain user type",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "age": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, _, _) = parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // Проверяем что создан TypeAlias, а не Struct
+        let user_model = models.iter().find(|m| m.name() == "User");
+        assert!(user_model.is_some(), "Expected User model");
+
+        match user_model.unwrap() {
+            ModelType::TypeAlias(alias) => {
+                assert_eq!(alias.name, "User");
+                assert_eq!(alias.target_type, "crate::domain::User");
+                assert_eq!(
+                    alias.description,
+                    Some("Custom domain user type".to_string())
+                );
+            }
+            _ => panic!("Expected TypeAlias, got different type"),
+        }
+    }
+
+    #[test]
+    fn test_x_rust_type_works_with_enum() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Status": {
+                        "type": "string",
+                        "enum": ["active", "inactive"],
+                        "x-rust-type": "crate::domain::Status"
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, _, _) = parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        let status_model = models.iter().find(|m| m.name() == "Status");
+        assert!(status_model.is_some(), "Expected Status model");
+
+        // Должен быть TypeAlias, не Enum
+        assert!(
+            matches!(status_model.unwrap(), ModelType::TypeAlias(_)),
+            "Expected TypeAlias for enum with x-rust-type"
+        );
+    }
+
+    #[test]
+    fn test_x_rust_type_works_with_oneof() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Payment": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "card": { "type": "string" } } },
+                            { "type": "object", "properties": { "cash": { "type": "number" } } }
+                        ],
+                        "x-rust-type": "payments::Payment"
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, _, _) = parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        let payment_model = models.iter().find(|m| m.name() == "Payment");
+        assert!(payment_model.is_some(), "Expected Payment model");
+
+        // Должен быть TypeAlias, не Union
+        match payment_model.unwrap() {
+            ModelType::TypeAlias(alias) => {
+                assert_eq!(alias.target_type, "payments::Payment");
+            }
+            _ => panic!("Expected TypeAlias for oneOf with x-rust-type"),
         }
     }
 }

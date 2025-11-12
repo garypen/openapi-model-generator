@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Request Bodies Support**: Full parsing and model generation from `components.requestBodies`. The generator now extracts schemas from request bodies and creates appropriate Rust models, supporting both inline schemas and `$ref` references.
+- **Custom Type Extension (`x-rust-type`)**: Added support for the `x-rust-type` OpenAPI vendor extension. When present on a schema, the generator creates a Rust type alias instead of generating a full struct or enum. This allows:
+  - Reusing existing domain models instead of generating duplicates
+  - Integration with types from other crates
+  - Clean separation between API models and domain models
+  - Works with any schema type (object, enum, oneOf, anyOf, allOf)
+
+### Fixed
+- **Nullable Fields in Referenced Schemas**: Fixed handling of `nullable` flag for fields that use `$ref` to reference other schemas. The nullable flag is now correctly resolved from the target schema.
+- **Required Fields in `allOf` Compositions**: Fixed merging of `required` fields in `allOf` compositions. Previously, only the `required` fields from the last schema were considered. Now all `required` fields from all schemas in the composition are properly collected and merged.
+
 ## [0.3.1] - 2025-11-04
 ### Fixed
 - **Response generation**: Fixed issue with response generation. [GitHub issue](https://github.com/denislituev/openapi-model-generator/issues/12)
