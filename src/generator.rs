@@ -1,7 +1,7 @@
 use crate::{
     models::{
-        CompositionModel, EnumModel, Model, ModelType, RequestModel, ResponseModel, UnionModel,
-        UnionType,
+        CompositionModel, EnumModel, Model, ModelType, RequestModel, ResponseModel, TypeAliasModel,
+        UnionModel, UnionType,
     },
     Result,
 };
@@ -45,6 +45,9 @@ pub fn generate_models(
             }
             ModelType::Enum(enum_model) => {
                 output.push_str(&generate_enum(enum_model)?);
+            }
+            ModelType::TypeAlias(type_alias) => {
+                output.push_str(&generate_type_alias(type_alias)?);
             }
         }
     }
@@ -253,6 +256,23 @@ fn generate_enum(enum_model: &EnumModel) -> Result<String> {
     }
 
     output.push_str("}\n");
+    Ok(output)
+}
+
+fn generate_type_alias(type_alias: &TypeAliasModel) -> Result<String> {
+    let mut output = String::new();
+
+    if let Some(description) = &type_alias.description {
+        output.push_str(&format!("/// {description}\n"));
+    } else {
+        output.push_str(&format!("/// {}\n", type_alias.name));
+    }
+
+    output.push_str(&format!(
+        "pub type {} = {};\n\n",
+        type_alias.name, type_alias.target_type
+    ));
+
     Ok(output)
 }
 
