@@ -44,6 +44,15 @@ pub fn parse_openapi(
 
     let mut added_models = HashSet::new();
 
+    let empty_schemas = IndexMap::new();
+    let empty_request_bodies = IndexMap::new();
+
+    let (schemas, request_bodies) = if let Some(components) = &openapi.components {
+        (&components.schemas, &components.request_bodies)
+    } else {
+        (&empty_schemas, &empty_request_bodies)
+    };
+
     // Parse components/schemas
     if let Some(components) = &openapi.components {
         for (name, schema) in &components.schemas {
@@ -55,27 +64,46 @@ pub fn parse_openapi(
             }
         }
 
-        // Parse paths
-        for (_path, path_item) in openapi.paths.iter() {
-            let path_item = match path_item {
-                ReferenceOr::Item(item) => item,
-                ReferenceOr::Reference { .. } => continue,
-            };
+        // Parse components/requestBodies - извлекаем схемы и создаем модели
+        for (name, request_body_ref) in &components.request_bodies {
+            if let ReferenceOr::Item(request_body) = request_body_ref {
+                for media_type in request_body.content.values() {
+                    if let Some(schema) = &media_type.schema {
+                        let model_types =
+                            parse_schema_to_model_type(name, schema, &components.schemas)?;
+                        for model_type in model_types {
+                            if added_models.insert(model_type.name().to_string()) {
+                                models.push(model_type);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-            if let Some(op) = &path_item.get {
-                process_operation(op, &mut requests, &mut responses, &components.schemas)?;
-            }
-            if let Some(op) = &path_item.post {
-                process_operation(op, &mut requests, &mut responses, &components.schemas)?;
-            }
-            if let Some(op) = &path_item.put {
-                process_operation(op, &mut requests, &mut responses, &components.schemas)?;
-            }
-            if let Some(op) = &path_item.delete {
-                process_operation(op, &mut requests, &mut responses, &components.schemas)?;
-            }
-            if let Some(op) = &path_item.patch {
-                process_operation(op, &mut requests, &mut responses, &components.schemas)?;
+    // Parse paths
+    for (_path, path_item) in openapi.paths.iter() {
+        let path_item = match path_item {
+            ReferenceOr::Item(item) => item,
+            ReferenceOr::Reference { .. } => continue,
+        };
+
+        let operations = [
+            &path_item.get,
+            &path_item.post,
+            &path_item.put,
+            &path_item.delete,
+            &path_item.patch,
+        ];
+
+        for op in operations.iter().filter_map(|o| o.as_ref()) {
+            let inline_models =
+                process_operation(op, &mut requests, &mut responses, schemas, request_bodies)?;
+            for model_type in inline_models {
+                if added_models.insert(model_type.name().to_string()) {
+                    models.push(model_type);
+                }
             }
         }
     }
@@ -88,21 +116,62 @@ fn process_operation(
     requests: &mut Vec<RequestModel>,
     responses: &mut Vec<ResponseModel>,
     all_schemas: &IndexMap<String, ReferenceOr<Schema>>,
-) -> Result<()> {
+    request_bodies: &IndexMap<String, ReferenceOr<openapiv3::RequestBody>>,
+) -> Result<Vec<ModelType>> {
+    let mut inline_models = Vec::new();
+
     // Parse request body
-    if let Some(ReferenceOr::Item(request_body)) = &operation.request_body {
-        for (content_type, media_type) in &request_body.content {
-            if let Some(schema) = &media_type.schema {
-                let request = RequestModel {
-                    name: format!(
-                        "{}Request",
-                        to_pascal_case(operation.operation_id.as_deref().unwrap_or("Unknown"))
-                    ),
-                    content_type: content_type.clone(),
-                    schema: extract_type_and_format(schema, all_schemas)?.0,
-                    is_required: request_body.required,
-                };
-                requests.push(request);
+    if let Some(request_body_ref) = &operation.request_body {
+        let (request_body_data, is_inline) = match request_body_ref {
+            ReferenceOr::Item(request_body) => (Some((request_body, request_body.required)), true),
+            ReferenceOr::Reference { reference } => {
+                if let Some(rb_name) = reference.strip_prefix("#/components/requestBodies/") {
+                    (
+                        request_bodies.get(rb_name).and_then(|rb_ref| match rb_ref {
+                            ReferenceOr::Item(rb) => Some((rb, false)),
+                            ReferenceOr::Reference { .. } => None,
+                        }),
+                        false,
+                    )
+                } else {
+                    (None, false)
+                }
+            }
+        };
+
+        if let Some((request_body, is_required)) = request_body_data {
+            for (content_type, media_type) in &request_body.content {
+                if let Some(schema) = &media_type.schema {
+                    let operation_name =
+                        to_pascal_case(operation.operation_id.as_deref().unwrap_or("Unknown"));
+
+                    let schema_type = if is_inline {
+                        if let ReferenceOr::Item(schema_item) = schema {
+                            if matches!(schema_item.schema_kind, SchemaKind::Type(Type::Object(_)))
+                            {
+                                let model_name = format!("{operation_name}RequestBody");
+                                let model_types =
+                                    parse_schema_to_model_type(&model_name, schema, all_schemas)?;
+                                inline_models.extend(model_types);
+                                model_name
+                            } else {
+                                extract_type_and_format(schema, all_schemas)?.0
+                            }
+                        } else {
+                            extract_type_and_format(schema, all_schemas)?.0
+                        }
+                    } else {
+                        extract_type_and_format(schema, all_schemas)?.0
+                    };
+
+                    let request = RequestModel {
+                        name: format!("{operation_name}Request"),
+                        content_type: content_type.clone(),
+                        schema: schema_type,
+                        is_required,
+                    };
+                    requests.push(request);
+                }
             }
         }
     }
@@ -127,7 +196,7 @@ fn process_operation(
             }
         }
     }
-    Ok(())
+    Ok(inline_models)
 }
 
 fn parse_schema_to_model_type(
@@ -345,7 +414,21 @@ fn extract_field_info(
     let (mut field_type, format) = extract_type_and_format(schema, all_schemas)?;
 
     let (is_nullable, en) = match schema {
-        ReferenceOr::Reference { .. } => (false, None),
+        ReferenceOr::Reference { reference } => {
+            let is_nullable =
+                if let Some(type_name) = reference.strip_prefix("#/components/schemas/") {
+                    all_schemas
+                        .get(type_name)
+                        .and_then(|s| match s {
+                            ReferenceOr::Item(schema) => Some(schema.schema_data.nullable),
+                            _ => None,
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+            (is_nullable, None)
+        }
 
         ReferenceOr::Item(schema) => {
             let is_nullable = schema.schema_data.nullable;
@@ -388,7 +471,24 @@ fn resolve_all_of_fields(
 ) -> Result<(Vec<Field>, Vec<ModelType>)> {
     let mut all_fields = Vec::new();
     let mut models = Vec::new();
+    let mut all_required_fields = HashSet::new();
 
+    for schema_ref in all_of {
+        let schema_to_check = match schema_ref {
+            ReferenceOr::Reference { reference } => reference
+                .strip_prefix("#/components/schemas/")
+                .and_then(|schema_name| all_schemas.get(schema_name)),
+            ReferenceOr::Item(_) => Some(schema_ref),
+        };
+
+        if let Some(ReferenceOr::Item(schema)) = schema_to_check {
+            if let SchemaKind::Type(Type::Object(obj)) = &schema.schema_kind {
+                all_required_fields.extend(obj.required.iter().cloned());
+            }
+        }
+    }
+
+    // Теперь собираем поля из всех схем
     for schema_ref in all_of {
         match schema_ref {
             ReferenceOr::Reference { reference } => {
@@ -408,6 +508,14 @@ fn resolve_all_of_fields(
             }
         }
     }
+
+    // Обновляем is_required для полей на основе объединенного множества required
+    for field in &mut all_fields {
+        if all_required_fields.contains(&field.name) {
+            field.is_required = true;
+        }
+    }
+
     Ok((all_fields, models))
 }
 
@@ -613,6 +721,278 @@ fn extract_fields_from_schema(
             }
 
             Ok((fields, inline_models))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_inline_request_body_generates_model() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": { "type": "string" },
+                                            "value": { "type": "integer" }
+                                        },
+                                        "required": ["name"]
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, requests, _responses) =
+            parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // 1. Проверяем, что модель запроса была создана
+        assert_eq!(requests.len(), 1);
+        let request_model = &requests[0];
+        assert_eq!(request_model.name, "CreateItemRequest");
+
+        // 2. Проверяем, что схема запроса ссылается на НОВУЮ модель, а не на Value
+        assert_eq!(request_model.schema, "CreateItemRequestBody");
+
+        // 3. Проверяем, что сама модель для тела запроса была сгенерирована
+        let inline_model = models.iter().find(|m| m.name() == "CreateItemRequestBody");
+        assert!(
+            inline_model.is_some(),
+            "Expected a model named 'CreateItemRequestBody' to be generated"
+        );
+
+        if let Some(ModelType::Struct(model)) = inline_model {
+            assert_eq!(model.fields.len(), 2);
+            assert_eq!(model.fields[0].name, "name");
+            assert_eq!(model.fields[0].field_type, "String");
+            assert!(model.fields[0].is_required);
+
+            assert_eq!(model.fields[1].name, "value");
+            assert_eq!(model.fields[1].field_type, "i64");
+            assert!(!model.fields[1].is_required);
+        } else {
+            panic!("Expected a Struct model for CreateItemRequestBody");
+        }
+    }
+
+    #[test]
+    fn test_parse_ref_request_body_works() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "components": {
+                "schemas": {
+                    "ItemData": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    }
+                },
+                "requestBodies": {
+                    "CreateItem": {
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ItemData" }
+                            }
+                        }
+                    }
+                }
+            },
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "requestBody": { "$ref": "#/components/requestBodies/CreateItem" },
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, requests, _responses) =
+            parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // Проверяем, что модель запроса была создана
+        assert_eq!(requests.len(), 1);
+        let request_model = &requests[0];
+        assert_eq!(request_model.name, "CreateItemRequest");
+
+        // Проверяем, что схема ссылается на существующую модель
+        assert_eq!(request_model.schema, "ItemData");
+
+        // Проверяем, что сама модель ItemData существует в списке моделей
+        assert!(models.iter().any(|m| m.name() == "ItemData"));
+    }
+
+    #[test]
+    fn test_parse_no_request_body() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (_models, requests, _responses) =
+            parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // Убеждаемся, что моделей запросов не создано
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn test_nullable_reference_field() {
+        // Тест проверяет что nullable корректно читается из целевой схемы при использовании $ref
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "NullableUser": {
+                        "type": "object",
+                        "nullable": true,
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    },
+                    "Post": {
+                        "type": "object",
+                        "properties": {
+                            "author": {
+                                "$ref": "#/components/schemas/NullableUser"
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, _, _) = parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // Находим модель Post
+        let post_model = models.iter().find(|m| m.name() == "Post");
+        assert!(post_model.is_some(), "Expected Post model to be generated");
+
+        if let Some(ModelType::Struct(post)) = post_model {
+            let author_field = post.fields.iter().find(|f| f.name == "author");
+            assert!(author_field.is_some(), "Expected author field");
+
+            // Проверяем что nullable правильно обработан для ссылочного типа
+            // (nullable берется из целевой схемы NullableUser)
+            let author = author_field.unwrap();
+            assert!(
+                author.is_nullable,
+                "Expected author field to be nullable (from referenced schema)"
+            );
+        } else {
+            panic!("Expected Post to be a Struct");
+        }
+    }
+
+    #[test]
+    fn test_allof_required_fields_merge() {
+        let openapi_spec: OpenAPI = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "BaseEntity": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "created": { "type": "string" }
+                        },
+                        "required": ["id"]
+                    },
+                    "Person": {
+                        "allOf": [
+                            { "$ref": "#/components/schemas/BaseEntity" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "age": { "type": "integer" }
+                                },
+                                "required": ["name"]
+                            }
+                        ]
+                    }
+                }
+            }
+        }))
+        .expect("Failed to deserialize OpenAPI spec");
+
+        let (models, _, _) = parse_openapi(&openapi_spec).expect("Failed to parse OpenAPI spec");
+
+        // Находим модель Person
+        let person_model = models.iter().find(|m| m.name() == "Person");
+        assert!(
+            person_model.is_some(),
+            "Expected Person model to be generated"
+        );
+
+        if let Some(ModelType::Composition(person)) = person_model {
+            // Проверяем что id (из BaseEntity) обязательное
+            let id_field = person.all_fields.iter().find(|f| f.name == "id");
+            assert!(id_field.is_some(), "Expected id field");
+            assert!(
+                id_field.unwrap().is_required,
+                "Expected id to be required from BaseEntity"
+            );
+
+            // Проверяем что name (из второго объекта) обязательное
+            let name_field = person.all_fields.iter().find(|f| f.name == "name");
+            assert!(name_field.is_some(), "Expected name field");
+            assert!(
+                name_field.unwrap().is_required,
+                "Expected name to be required from inline object"
+            );
+
+            // Проверяем что created и age не обязательные
+            let created_field = person.all_fields.iter().find(|f| f.name == "created");
+            assert!(created_field.is_some(), "Expected created field");
+            assert!(
+                !created_field.unwrap().is_required,
+                "Expected created to be optional"
+            );
+
+            let age_field = person.all_fields.iter().find(|f| f.name == "age");
+            assert!(age_field.is_some(), "Expected age field");
+            assert!(
+                !age_field.unwrap().is_required,
+                "Expected age to be optional"
+            );
+        } else {
+            panic!("Expected Person to be a Composition");
         }
     }
 }
