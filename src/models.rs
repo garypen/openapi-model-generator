@@ -35,6 +35,7 @@ pub struct Field {
     pub format: String,
     pub is_required: bool,
     pub is_nullable: bool,
+    pub is_array_ref: bool,
 }
 
 impl Field {

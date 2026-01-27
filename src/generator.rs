@@ -96,17 +96,19 @@ pub fn generate_models(
 ) -> Result<String> {
     // First, generate all model code to determine which imports are needed
     let mut models_code = String::new();
+    // Determine which imports are actually needed
+    let mut needs_uuid = false;
 
     for model_type in models {
         match model_type {
             ModelType::Struct(model) => {
-                models_code.push_str(&generate_model(model)?);
+                models_code.push_str(&generate_model(model, &mut needs_uuid)?);
             }
             ModelType::Union(union) => {
                 models_code.push_str(&generate_union(union)?);
             }
             ModelType::Composition(comp) => {
-                models_code.push_str(&generate_composition(comp)?);
+                models_code.push_str(&generate_composition(comp, &mut needs_uuid)?);
             }
             ModelType::Enum(enum_model) => {
                 models_code.push_str(&generate_enum(enum_model)?);
@@ -126,7 +128,6 @@ pub fn generate_models(
     }
 
     // Determine which imports are actually needed
-    let needs_uuid = models_code.contains("Uuid");
     let needs_datetime = models_code.contains("DateTime<Utc>");
     let needs_date = models_code.contains("NaiveDate");
 
@@ -160,7 +161,7 @@ pub fn generate_models(
     Ok(output)
 }
 
-fn generate_model(model: &Model) -> Result<String> {
+fn generate_model(model: &Model, needs_uuid: &mut bool) -> Result<String> {
     let mut output = String::new();
 
     if !model.name.is_empty() {
@@ -184,7 +185,10 @@ fn generate_model(model: &Model) -> Result<String> {
             "bool" => "bool",
             "DateTime" => "DateTime<Utc>",
             "Date" => "NaiveDate",
-            "Uuid" => "Uuid",
+            "Uuid" => {
+                *needs_uuid = true;
+                "Uuid"
+            }
             _ => &field.field_type,
         };
 
@@ -290,7 +294,7 @@ fn generate_union(union: &UnionModel) -> Result<String> {
     Ok(output)
 }
 
-fn generate_composition(comp: &CompositionModel) -> Result<String> {
+fn generate_composition(comp: &CompositionModel, needs_uuid: &mut bool) -> Result<String> {
     let mut output = String::new();
 
     output.push_str(&format!("/// {} (allOf composition)\n", comp.name));
@@ -311,7 +315,10 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
             "bool" => "bool",
             "DateTime" => "DateTime<Utc>",
             "Date" => "NaiveDate",
-            "Uuid" => "Uuid",
+            "Uuid" => {
+                *needs_uuid = true;
+                "Uuid"
+            }
             _ => &field.field_type,
         };
 
@@ -325,7 +332,10 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
             output.push_str(&format!("    #[serde(rename = \"{}\")]\n", field.name));
         }
 
-        if field.is_required && !field.is_nullable {
+        // If we are referencing an array, then we should provide a Vec
+        if field.is_array_ref {
+            output.push_str(&format!("    pub {lowercased_name}: Vec<{field_type}>,\n"));
+        } else if field.is_required && !field.is_nullable {
             output.push_str(&format!("    pub {lowercased_name}: {field_type},\n"));
         } else {
             output.push_str(&format!(
@@ -342,7 +352,9 @@ fn generate_enum(enum_model: &EnumModel) -> Result<String> {
     let mut output = String::new();
 
     if let Some(description) = &enum_model.description {
-        output.push_str(&format!("/// {description}\n"));
+        for line in description.lines() {
+            output.push_str(&format!("/// {}\n", line.trim()));
+        }
     } else {
         output.push_str(&format!("/// {}\n", enum_model.name));
     }
@@ -359,10 +371,7 @@ fn generate_enum(enum_model: &EnumModel) -> Result<String> {
     for (i, variant) in enum_model.variants.iter().enumerate() {
         let original = variant.clone();
 
-        let mut chars = variant.chars();
-        let first_char = chars.next().unwrap().to_ascii_uppercase();
-        let rest: String = chars.collect();
-        let mut rust_name = format!("{first_char}{rest}");
+        let mut rust_name = crate::parser::to_pascal_case(variant);
 
         let serde_rename = if is_reserved_word(&rust_name) {
             rust_name.push_str("Value");
@@ -392,7 +401,9 @@ fn generate_type_alias(type_alias: &TypeAliasModel) -> Result<String> {
     let mut output = String::new();
 
     if let Some(description) = &type_alias.description {
-        output.push_str(&format!("/// {description}\n"));
+        for line in description.lines() {
+            output.push_str(&format!("/// {}\n", line.trim()));
+        }
     } else {
         output.push_str(&format!("/// {}\n", type_alias.name));
     }

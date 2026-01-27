@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 use openapiv3::{
     OpenAPI, ReferenceOr, Schema, SchemaKind, StringFormat, Type, VariantOrUnknownOrEmpty,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Information about a field extracted from OpenAPI schema
@@ -17,11 +18,12 @@ struct FieldInfo {
     field_type: String,
     format: String,
     is_nullable: bool,
+    is_array_ref: bool,
 }
 
 /// Converts camelCase to PascalCase
 /// Example: "createRole" -> "CreateRole", "listRoles" -> "ListRoles", "listRoles-Input" -> "ListRolesInput"
-fn to_pascal_case(input: &str) -> String {
+pub(crate) fn to_pascal_case(input: &str) -> String {
     input
         .split(&['-', '_'][..])
         .filter(|s| !s.is_empty())
@@ -303,6 +305,7 @@ fn parse_schema_to_model_type(
                             format: field_info.format,
                             is_required,
                             is_nullable: field_info.is_nullable,
+                            is_array_ref: field_info.is_array_ref,
                         });
                     }
 
@@ -378,7 +381,7 @@ fn parse_schema_to_model_type(
                         let variants: Vec<String> = string_type
                             .enumeration
                             .iter()
-                            .filter_map(|value| value.clone())
+                            .filter_map(|value| value.as_ref().map(|v| to_pascal_case(v)))
                             .collect();
 
                         if !variants.is_empty() {
@@ -390,6 +393,31 @@ fn parse_schema_to_model_type(
                             })];
 
                             return Ok(models);
+                        }
+                    }
+                    Ok(Vec::new())
+                }
+
+                // array
+                SchemaKind::Type(Type::Array(array_type)) => {
+                    if let Some(items) = &array_type.items {
+                        if let Some(items) = items.as_item() {
+                            // Copied from oneOf processing above. This might be better performed
+                            // by a recursive call into this function somewhere, but...
+                            if let SchemaKind::OneOf { one_of } = &items.schema_kind {
+                                let (variants, inline_models) =
+                                    resolve_union_variants(name, one_of, all_schemas)?;
+                                let mut models = inline_models;
+
+                                models.push(ModelType::Union(UnionModel {
+                                    name: to_pascal_case(name),
+                                    variants,
+                                    union_type: UnionType::OneOf,
+                                    custom_attrs: extract_custom_attrs(schema),
+                                }));
+
+                                return Ok(models);
+                            }
                         }
                     }
                     Ok(Vec::new())
@@ -491,24 +519,36 @@ fn extract_field_info(
 ) -> Result<(FieldInfo, Option<ModelType>)> {
     let (mut field_type, format) = extract_type_and_format(schema, all_schemas)?;
 
-    let (is_nullable, en) = match schema {
+    let (is_array_ref, is_nullable, en) = match schema {
         ReferenceOr::Reference { reference } => {
-            let is_nullable =
+            let (is_array_ref, is_nullable) =
                 if let Some(type_name) = reference.strip_prefix("#/components/schemas/") {
                     all_schemas
                         .get(type_name)
                         .and_then(|s| match s {
-                            ReferenceOr::Item(schema) => Some(schema.schema_data.nullable),
+                            ReferenceOr::Item(schema) => {
+                                if matches!(schema.schema_kind, SchemaKind::Type(Type::Array(_))) {
+                                    Some((true, schema.schema_data.nullable))
+                                } else {
+                                    Some((false, schema.schema_data.nullable))
+                                }
+                            }
                             _ => None,
                         })
-                        .unwrap_or(false)
+                        .unwrap_or((false, false))
                 } else {
-                    false
+                    (false, false)
                 };
-            (is_nullable, None)
+            (is_array_ref, is_nullable, None)
         }
 
         ReferenceOr::Item(schema) => {
+            if let Some(rust_type) = schema.schema_data.extensions.get("x-rust-type") {
+                if let Some(type_str) = rust_type.as_str() {
+                    field_type = type_str.to_string();
+                }
+            }
+
             let is_nullable = schema.schema_data.nullable;
 
             let maybe_enum = match &schema.schema_kind {
@@ -529,7 +569,7 @@ fn extract_field_info(
                 }
                 _ => None,
             };
-            (is_nullable, maybe_enum)
+            (false, is_nullable, maybe_enum)
         }
     };
 
@@ -538,6 +578,7 @@ fn extract_field_info(
             field_type,
             format,
             is_nullable,
+            is_array_ref,
         },
         en,
     ))
@@ -548,7 +589,7 @@ fn resolve_all_of_fields(
     all_of: &[ReferenceOr<Schema>],
     all_schemas: &IndexMap<String, ReferenceOr<Schema>>,
 ) -> Result<(Vec<Field>, Vec<ModelType>)> {
-    let mut all_fields = Vec::new();
+    let mut all_fields: HashMap<String, Field> = HashMap::new();
     let mut models = Vec::new();
     let mut all_required_fields = HashSet::new();
 
@@ -568,6 +609,7 @@ fn resolve_all_of_fields(
     }
 
     // Теперь собираем поля из всех схем
+    // (google translate): Now we collect fields from all the schemas
     for schema_ref in all_of {
         match schema_ref {
             ReferenceOr::Reference { reference } => {
@@ -575,27 +617,46 @@ fn resolve_all_of_fields(
                     if let Some(referenced_schema) = all_schemas.get(schema_name) {
                         let (fields, inline_models) =
                             extract_fields_from_schema(referenced_schema, all_schemas)?;
-                        all_fields.extend(fields);
+                        // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
+                        for field in fields {
+                            if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                                if existing_field.field_type == "serde_json::Value" {
+                                    *existing_field = field;
+                                }
+                            } else {
+                                all_fields.insert(field.name.clone(), field);
+                            }
+                        }
                         models.extend(inline_models);
                     }
                 }
             }
             ReferenceOr::Item(_schema) => {
                 let (fields, inline_models) = extract_fields_from_schema(schema_ref, all_schemas)?;
-                all_fields.extend(fields);
+                // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
+                for field in fields {
+                    if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                        if existing_field.field_type == "serde_json::Value" {
+                            *existing_field = field;
+                        }
+                    } else {
+                        all_fields.insert(field.name.clone(), field);
+                    }
+                }
                 models.extend(inline_models);
             }
         }
     }
 
     // Обновляем is_required для полей на основе объединенного множества required
-    for field in &mut all_fields {
+    // (google translate): Update is_required for fields based on the joined required set
+    for field in all_fields.values_mut() {
         if all_required_fields.contains(&field.name) {
             field.is_required = true;
         }
     }
 
-    Ok((all_fields, models))
+    Ok((all_fields.into_values().collect(), models))
 }
 
 fn resolve_union_variants(
@@ -749,6 +810,7 @@ fn extract_fields_from_schema(
                             format: field_info.format,
                             is_required,
                             is_nullable,
+                            is_array_ref: field_info.is_array_ref,
                         });
                         if let Some(inline_model) = inline_model {
                             match &inline_model {
