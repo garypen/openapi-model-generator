@@ -41,6 +41,18 @@ fn is_reserved_word(string_to_check: &str) -> bool {
     RUST_RESERVED_KEYWORDS.contains(&string_to_check.to_lowercase().as_str())
 }
 
+fn generate_description_docs(description: &Option<String>, fallback_str: &str) -> String {
+    let mut output = String::new();
+    if let Some(desc) = description {
+        for line in desc.lines() {
+            output.push_str(&format!("/// {}\n", line.trim()));
+        }
+    } else {
+        output.push_str(&format!("/// {}\n", fallback_str));
+    }
+    output
+}
+
 fn to_snake_case(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -361,11 +373,10 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
 fn generate_enum(enum_model: &EnumModel) -> Result<String> {
     let mut output = String::new();
 
-    if let Some(description) = &enum_model.description {
-        output.push_str(&format!("/// {description}\n"));
-    } else {
-        output.push_str(&format!("/// {}\n", enum_model.name));
-    }
+    output.push_str(&generate_description_docs(
+        &enum_model.description,
+        &enum_model.name,
+    ));
 
     output.push_str(&generate_custom_attrs(&enum_model.custom_attrs));
 
@@ -411,11 +422,10 @@ fn generate_enum(enum_model: &EnumModel) -> Result<String> {
 fn generate_type_alias(type_alias: &TypeAliasModel) -> Result<String> {
     let mut output = String::new();
 
-    if let Some(description) = &type_alias.description {
-        output.push_str(&format!("/// {description}\n"));
-    } else {
-        output.push_str(&format!("/// {}\n", type_alias.name));
-    }
+    output.push_str(&generate_description_docs(
+        &type_alias.description,
+        &type_alias.name,
+    ));
 
     output.push_str(&generate_custom_attrs(&type_alias.custom_attrs));
     output.push_str(&format!(
