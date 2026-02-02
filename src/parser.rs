@@ -10,7 +10,7 @@ use openapiv3::{
     AdditionalProperties, OpenAPI, ReferenceOr, Schema, SchemaKind, StringFormat, Type,
     VariantOrUnknownOrEmpty,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const X_RUST_TYPE: &str = "x-rust-type";
 const X_RUST_ATTRS: &str = "x-rust-attrs";
@@ -739,7 +739,7 @@ fn resolve_all_of_fields(
     all_of: &[ReferenceOr<Schema>],
     all_schemas: &IndexMap<String, ReferenceOr<Schema>>,
 ) -> Result<(Vec<Field>, Vec<ModelType>)> {
-    let mut all_fields = Vec::new();
+    let mut all_fields: HashMap<String, Field> = HashMap::new();
     let mut models = Vec::new();
     let mut all_required_fields = HashSet::new();
 
@@ -766,27 +766,45 @@ fn resolve_all_of_fields(
                     if let Some(referenced_schema) = all_schemas.get(schema_name) {
                         let (fields, inline_models) =
                             extract_fields_from_schema(referenced_schema, all_schemas)?;
-                        all_fields.extend(fields);
+                        // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
+                        for field in fields {
+                            if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                                if existing_field.field_type == "serde_json::Value" {
+                                    *existing_field = field;
+                                }
+                            } else {
+                                all_fields.insert(field.name.clone(), field);
+                            }
+                        }
                         models.extend(inline_models);
                     }
                 }
             }
             ReferenceOr::Item(_schema) => {
                 let (fields, inline_models) = extract_fields_from_schema(schema_ref, all_schemas)?;
-                all_fields.extend(fields);
+                // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
+                for field in fields {
+                    if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                        if existing_field.field_type == "serde_json::Value" {
+                            *existing_field = field;
+                        }
+                    } else {
+                        all_fields.insert(field.name.clone(), field);
+                    }
+                }
                 models.extend(inline_models);
             }
         }
     }
 
     // Update is_required for fields based on the merged required set
-    for field in &mut all_fields {
+    for field in all_fields.values_mut() {
         if all_required_fields.contains(&field.name) {
             field.is_required = true;
         }
     }
 
-    Ok((all_fields, models))
+    Ok((all_fields.into_values().collect(), models))
 }
 
 fn resolve_union_variants(
