@@ -7,7 +7,8 @@ use crate::{
 };
 use indexmap::IndexMap;
 use openapiv3::{
-    OpenAPI, ReferenceOr, Schema, SchemaKind, StringFormat, Type, VariantOrUnknownOrEmpty,
+    AdditionalProperties, OpenAPI, ReferenceOr, Schema, SchemaKind, StringFormat, Type,
+    VariantOrUnknownOrEmpty,
 };
 use std::collections::HashSet;
 
@@ -20,6 +21,7 @@ struct FieldInfo {
     field_type: String,
     format: String,
     is_nullable: bool,
+    is_array_ref: bool,
     description: Option<String>,
 }
 
@@ -283,6 +285,20 @@ fn parse_schema_to_model_type(
 
                     // Process regular properties
                     for (field_name, field_schema) in &obj.properties {
+                        if let ReferenceOr::Item(boxed_schema) = field_schema {
+                            if matches!(boxed_schema.schema_kind, SchemaKind::Type(Type::Object(_)))
+                            {
+                                let struct_name = to_pascal_case(field_name);
+                                let wrapped_schema = ReferenceOr::Item((**boxed_schema).clone());
+                                let nested_models = parse_schema_to_model_type(
+                                    &struct_name,
+                                    &wrapped_schema,
+                                    all_schemas,
+                                )?;
+                                inline_models.extend(nested_models);
+                            }
+                        }
+
                         let (field_info, inline_model) = match field_schema {
                             ReferenceOr::Item(boxed_schema) => extract_field_info(
                                 field_name,
@@ -306,6 +322,7 @@ fn parse_schema_to_model_type(
                             field_type: field_info.field_type,
                             format: field_info.format,
                             is_required,
+                            is_array_ref: field_info.is_array_ref,
                             is_nullable: field_info.is_nullable,
                             description: field_info.description,
                         });
@@ -315,7 +332,7 @@ fn parse_schema_to_model_type(
                     if obj.properties.is_empty() && obj.additional_properties.is_none() {
                         models.push(ModelType::Struct(Model {
                             name: to_pascal_case(name),
-                            fields: vec![], // Empty struct
+                            fields: vec![],
                             custom_attrs: extract_custom_attrs(schema),
                             description: schema.schema_data.description.clone(),
                         }));
@@ -402,6 +419,134 @@ fn parse_schema_to_model_type(
                     Ok(Vec::new())
                 }
 
+                SchemaKind::Type(Type::Array(array)) => {
+                    let mut models = Vec::new();
+                    let array_name = to_pascal_case(name);
+
+                    let items = match &array.items {
+                        Some(items) => items,
+                        None => return Ok(Vec::new()),
+                    };
+
+                    match items {
+                        ReferenceOr::Item(item_schema) => match &item_schema.schema_kind {
+                            SchemaKind::OneOf { one_of } => {
+                                let item_type_name = format!("{array_name}Item");
+
+                                let (variants, inline_models) =
+                                    resolve_union_variants(&item_type_name, one_of, all_schemas)?;
+
+                                models.extend(inline_models);
+
+                                models.push(ModelType::Union(UnionModel {
+                                    name: item_type_name.clone(),
+                                    variants,
+                                    union_type: UnionType::OneOf,
+                                    custom_attrs: extract_custom_attrs(item_schema),
+                                }));
+
+                                models.push(ModelType::TypeAlias(TypeAliasModel {
+                                    name: array_name,
+                                    target_type: format!("Vec<{item_type_name}>"),
+                                    description: schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(schema),
+                                }));
+                            }
+
+                            SchemaKind::Type(Type::String(s)) if !s.enumeration.is_empty() => {
+                                let item_type_name = format!("{array_name}Item");
+
+                                let variants: Vec<String> =
+                                    s.enumeration.iter().filter_map(|v| v.clone()).collect();
+
+                                models.push(ModelType::Enum(EnumModel {
+                                    name: item_type_name.clone(),
+                                    variants,
+                                    description: item_schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(item_schema),
+                                }));
+
+                                models.push(ModelType::TypeAlias(TypeAliasModel {
+                                    name: array_name,
+                                    target_type: format!("Vec<{item_type_name}>"),
+                                    description: schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(schema),
+                                }));
+                            }
+
+                            SchemaKind::Type(Type::Integer(n)) if !n.enumeration.is_empty() => {
+                                let item_type_name = format!("{array_name}Item");
+
+                                let variants: Vec<String> = n
+                                    .enumeration
+                                    .iter()
+                                    .filter_map(|v| v.map(|num| format!("Value{num}")))
+                                    .collect();
+
+                                models.push(ModelType::Enum(EnumModel {
+                                    name: item_type_name.clone(),
+                                    variants,
+                                    description: item_schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(item_schema),
+                                }));
+
+                                models.push(ModelType::TypeAlias(TypeAliasModel {
+                                    name: array_name,
+                                    target_type: format!("Vec<{item_type_name}>"),
+                                    description: schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(schema),
+                                }));
+                            }
+
+                            _ => {
+                                let normalized_items = match items {
+                                    ReferenceOr::Item(boxed_schema) => {
+                                        ReferenceOr::Item((**boxed_schema).clone())
+                                    }
+                                    ReferenceOr::Reference { reference } => {
+                                        ReferenceOr::Reference {
+                                            reference: reference.clone(),
+                                        }
+                                    }
+                                };
+
+                                let (inner_type, _) =
+                                    extract_type_and_format(&normalized_items, all_schemas)?;
+
+                                models.push(ModelType::TypeAlias(TypeAliasModel {
+                                    name: array_name,
+                                    target_type: format!("Vec<{inner_type}>"),
+                                    description: schema.schema_data.description.clone(),
+                                    custom_attrs: extract_custom_attrs(schema),
+                                }));
+                            }
+                        },
+
+                        ReferenceOr::Reference { .. } => {
+                            let normalized_items = match items {
+                                ReferenceOr::Item(boxed_schema) => {
+                                    ReferenceOr::Item((**boxed_schema).clone())
+                                }
+                                ReferenceOr::Reference { reference } => ReferenceOr::Reference {
+                                    reference: reference.clone(),
+                                },
+                            };
+
+                            let (inner_type, _) =
+                                extract_type_and_format(&normalized_items, all_schemas)?;
+
+                            models.push(ModelType::TypeAlias(TypeAliasModel {
+                                name: array_name,
+                                target_type: format!("Vec<{inner_type}>"),
+                                description: schema.schema_data.description.clone(),
+                                custom_attrs: extract_custom_attrs(schema),
+                            }));
+                        }
+                    }
+
+                    Ok(models)
+                }
+
                 _ => Ok(Vec::new()),
             }
         }
@@ -447,39 +592,21 @@ fn extract_type_and_format(
             SchemaKind::Type(Type::Boolean(_)) => Ok(("bool".to_string(), "boolean".to_string())),
             SchemaKind::Type(Type::Array(arr)) => {
                 if let Some(items) = &arr.items {
-                    let items_ref: &ReferenceOr<Box<Schema>> = items;
-                    let (inner_type, format) = match items_ref {
+                    match items {
                         ReferenceOr::Item(boxed_schema) => extract_type_and_format(
                             &ReferenceOr::Item((**boxed_schema).clone()),
                             all_schemas,
-                        )?,
-                        ReferenceOr::Reference { reference } => {
-                            let type_name = reference.split('/').next_back().unwrap_or("Unknown");
+                        ),
 
-                            if let Some(ReferenceOr::Item(schema)) = all_schemas.get(type_name) {
-                                if matches!(schema.schema_kind, SchemaKind::OneOf { .. }) {
-                                    (to_pascal_case(type_name), "oneOf".to_string())
-                                } else {
-                                    extract_type_and_format(
-                                        &ReferenceOr::Reference {
-                                            reference: reference.clone(),
-                                        },
-                                        all_schemas,
-                                    )?
-                                }
-                            } else {
-                                extract_type_and_format(
-                                    &ReferenceOr::Reference {
-                                        reference: reference.clone(),
-                                    },
-                                    all_schemas,
-                                )?
-                            }
-                        }
-                    };
-                    Ok((format!("Vec<{inner_type}>"), format))
+                        ReferenceOr::Reference { reference } => extract_type_and_format(
+                            &ReferenceOr::Reference {
+                                reference: reference.clone(),
+                            },
+                            all_schemas,
+                        ),
+                    }
                 } else {
-                    Ok(("Vec<serde_json::Value>".to_string(), "array".to_string()))
+                    Ok(("serde_json::Value".to_string(), "array".to_string()))
                 }
             }
             SchemaKind::Type(Type::Object(_obj)) => {
@@ -498,21 +625,29 @@ fn extract_field_info(
 ) -> Result<(FieldInfo, Option<ModelType>)> {
     let (mut field_type, format) = extract_type_and_format(schema, all_schemas)?;
 
-    let (is_nullable, en, description) = match schema {
+    let (is_nullable, is_array_ref, en, description) = match schema {
         ReferenceOr::Reference { reference } => {
-            let is_nullable =
-                if let Some(type_name) = reference.strip_prefix("#/components/schemas/") {
-                    all_schemas
-                        .get(type_name)
-                        .and_then(|s| match s {
-                            ReferenceOr::Item(schema) => Some(schema.schema_data.nullable),
-                            _ => None,
-                        })
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-            (is_nullable, None, None)
+            let mut is_array_ref = false;
+            let mut is_nullable = false;
+
+            if let Some(type_name) = reference.strip_prefix("#/components/schemas/") {
+                if let Some(ReferenceOr::Item(schema)) = all_schemas.get(type_name) {
+                    is_nullable = schema.schema_data.nullable;
+
+                    if let SchemaKind::Type(Type::Array(array)) = &schema.schema_kind {
+                        let is_items_one_of = match &array.items {
+                            Some(ReferenceOr::Item(item_schema)) => {
+                                matches!(item_schema.schema_kind, SchemaKind::OneOf { .. })
+                            }
+                            _ => false,
+                        };
+
+                        is_array_ref = !is_items_one_of;
+                    }
+                }
+            }
+
+            (is_nullable, is_array_ref, None, None)
         }
 
         ReferenceOr::Item(schema) => {
@@ -522,9 +657,9 @@ fn extract_field_info(
                 }
             }
 
-            let description = schema.schema_data.description.clone();
-
             let is_nullable = schema.schema_data.nullable;
+            let is_array_ref = matches!(schema.schema_kind, SchemaKind::Type(Type::Array(_)));
+            let description = schema.schema_data.description.clone();
 
             let maybe_enum = match &schema.schema_kind {
                 SchemaKind::Type(Type::String(s)) if !s.enumeration.is_empty() => {
@@ -538,13 +673,54 @@ fn extract_field_info(
                         custom_attrs: extract_custom_attrs(schema),
                     }))
                 }
-                SchemaKind::Type(Type::Object(_)) => {
-                    field_type = "serde_json::Value".to_string();
-                    None
+                SchemaKind::Type(Type::Object(obj)) => {
+                    if obj.properties.is_empty() {
+                        if let Some(additional_props) = &obj.additional_properties {
+                            match additional_props {
+                                AdditionalProperties::Schema(schema) => {
+                                    let (value_type, _) =
+                                        extract_type_and_format(&schema.clone(), all_schemas)?;
+
+                                    field_type = format!(
+                                        "std::collections::HashMap<String, {}>",
+                                        value_type
+                                    );
+                                }
+
+                                AdditionalProperties::Any(true) => {
+                                    field_type =
+                                        "std::collections::HashMap<String, serde_json::Value>"
+                                            .to_string();
+                                }
+
+                                AdditionalProperties::Any(false) => {
+                                    // technically: no additional props allowed
+                                    field_type = "serde_json::Value".to_string();
+                                }
+                            }
+                            None
+                        } else {
+                            field_type = "serde_json::Value".to_string();
+                            None
+                        }
+                    } else {
+                        let struct_name = to_pascal_case(field_name);
+                        field_type = struct_name.clone();
+
+                        let wrapped_schema = ReferenceOr::Item(schema.clone());
+                        let models =
+                            parse_schema_to_model_type(&struct_name, &wrapped_schema, all_schemas)?;
+
+                        let struct_model = models
+                            .into_iter()
+                            .find(|m| matches!(m, ModelType::Struct(_)));
+
+                        struct_model
+                    }
                 }
                 _ => None,
             };
-            (is_nullable, maybe_enum, description)
+            (is_nullable, is_array_ref, maybe_enum, description)
         }
     };
 
@@ -553,6 +729,7 @@ fn extract_field_info(
             field_type,
             format,
             is_nullable,
+            is_array_ref,
             description,
         },
         en,
@@ -695,6 +872,7 @@ fn resolve_union_variants(
                                 variants.push(UnionVariant {
                                     name: to_pascal_case(schema_name),
                                     fields: vec![],
+                                    primitive_type: None,
                                 });
                             } else {
                                 let (fields, inline_models) =
@@ -702,6 +880,7 @@ fn resolve_union_variants(
                                 variants.push(UnionVariant {
                                     name: to_pascal_case(schema_name),
                                     fields,
+                                    primitive_type: None,
                                 });
                                 models.extend(inline_models);
                             }
@@ -709,15 +888,51 @@ fn resolve_union_variants(
                     }
                 }
             }
-            ReferenceOr::Item(_) => {
-                let (fields, inline_models) = extract_fields_from_schema(schema_ref, all_schemas)?;
-                let variant_name = format!("Variant{index}");
-                variants.push(UnionVariant {
-                    name: variant_name,
-                    fields,
-                });
-                models.extend(inline_models);
-            }
+            ReferenceOr::Item(schema) => match &schema.schema_kind {
+                SchemaKind::Type(Type::String(_)) => {
+                    variants.push(UnionVariant {
+                        name: "String".to_string(),
+                        fields: vec![],
+                        primitive_type: Some("String".to_string()),
+                    });
+                }
+
+                SchemaKind::Type(Type::Integer(_)) => {
+                    variants.push(UnionVariant {
+                        name: "Integer".to_string(),
+                        fields: vec![],
+                        primitive_type: Some("i64".to_string()),
+                    });
+                }
+
+                SchemaKind::Type(Type::Number(_)) => {
+                    variants.push(UnionVariant {
+                        name: "Number".to_string(),
+                        fields: vec![],
+                        primitive_type: Some("f64".to_string()),
+                    });
+                }
+
+                SchemaKind::Type(Type::Boolean(_)) => {
+                    variants.push(UnionVariant {
+                        name: "Boolean".to_string(),
+                        fields: vec![],
+                        primitive_type: Some("Boolean".to_string()),
+                    });
+                }
+
+                _ => {
+                    let (fields, inline_models) =
+                        extract_fields_from_schema(schema_ref, all_schemas)?;
+                    let variant_name = format!("Variant{index}");
+                    variants.push(UnionVariant {
+                        name: variant_name,
+                        fields,
+                        primitive_type: None,
+                    });
+                    models.extend(inline_models);
+                }
+            },
         }
     }
 
@@ -765,6 +980,7 @@ fn extract_fields_from_schema(
                             format: field_info.format,
                             is_required,
                             is_nullable,
+                            is_array_ref: field_info.is_array_ref,
                             description: field_info.description,
                         });
                         if let Some(inline_model) = inline_model {
