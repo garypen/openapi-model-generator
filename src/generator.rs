@@ -244,7 +244,16 @@ fn generate_model(model: &Model) -> Result<String> {
             output.push_str("    #[serde(flatten)]\n");
         }
 
-        if field.is_required && !field.is_nullable {
+        // If field references an array, wrap it in Vec<>
+        if field.is_array_ref {
+            if field.is_required && !field.is_nullable {
+                output.push_str(&format!("    pub {lowercased_name}: Vec<{field_type}>,\n",));
+            } else {
+                output.push_str(&format!(
+                    "    pub {lowercased_name}: Option<Vec<{field_type}>>,\n",
+                ));
+            }
+        } else if field.is_required && !field.is_nullable {
             output.push_str(&format!("    pub {lowercased_name}: {field_type},\n",));
         } else {
             output.push_str(&format!(
@@ -323,7 +332,10 @@ fn generate_union(union: &UnionModel) -> Result<String> {
     output.push_str(&format!("pub enum {} {{\n", union.name));
 
     for variant in &union.variants {
-        output.push_str(&format!("    {}({}),\n", variant.name, variant.name));
+        match &variant.primitive_type {
+            Some(t) => output.push_str(&format!("    {}({}),\n", variant.name, t)),
+            None => output.push_str(&format!("    {}({}),\n", variant.name, variant.name)),
+        }
     }
 
     output.push_str("}\n");
@@ -365,11 +377,20 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
             output.push_str(&format!("    #[serde(rename = \"{}\")]\n", field.name));
         }
 
-        if field.is_required && !field.is_nullable {
-            output.push_str(&format!("    pub {lowercased_name}: {field_type},\n"));
+        // If field references an array, wrap it in Vec<>
+        if field.is_array_ref {
+            if field.is_required && !field.is_nullable {
+                output.push_str(&format!("    pub {lowercased_name}: Vec<{field_type}>,\n",));
+            } else {
+                output.push_str(&format!(
+                    "    pub {lowercased_name}: Option<Vec<{field_type}>>,\n",
+                ));
+            }
+        } else if field.is_required && !field.is_nullable {
+            output.push_str(&format!("    pub {lowercased_name}: {field_type},\n",));
         } else {
             output.push_str(&format!(
-                "    pub {lowercased_name}: Option<{field_type}>,\n"
+                "    pub {lowercased_name}: Option<{field_type}>,\n",
             ));
         }
     }

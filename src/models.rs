@@ -36,6 +36,7 @@ pub struct Field {
     pub format: String,
     pub is_required: bool,
     pub is_nullable: bool,
+    pub is_array_ref: bool,
     pub description: Option<String>,
 }
 
@@ -64,6 +65,7 @@ pub enum UnionType {
 pub struct UnionVariant {
     pub name: String,
     pub fields: Vec<Field>,
+    pub primitive_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
