@@ -769,9 +769,31 @@ fn resolve_all_of_fields(
                         // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
                         for field in fields {
                             if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                                // Value
                                 if existing_field.field_type == "serde_json::Value" {
-                                    *existing_field = field;
-                                }
+                            *existing_field = field;
+                        } else if existing_field.field_type == "Option<serde_json::Value>" {
+                            existing_field.field_type = format!("Option<{}>", field.field_type);
+                        // HashMap Value
+                        } else if existing_field.field_type
+                            == "std::collections::HashMap<String, serde_json::Value>"
+                        {
+                            existing_field.field_type =
+                                format!("std::collections::HashMap<String, {}>", field.field_type);
+                        } else if existing_field.field_type
+                            == "Option<std::collections::HashMap<String, serde_json::Value>>"
+                        {
+                            existing_field.field_type = format!(
+                                "Option<std::collections::HashMap<String, {}>>",
+                                field.field_type
+                            );
+                        // Vec Value
+                        } else if existing_field.field_type == "Vec<serde_json::Value>" {
+                            existing_field.field_type = format!("Vec<{}>", field.field_type);
+                        } else if existing_field.field_type == "Option<Vec<serde_json::Value>>" {
+                            existing_field.field_type =
+                                format!("Option<Vec<{}>>", field.field_type);
+                        }
                             } else {
                                 all_fields.insert(field.name.clone(), field);
                             }
@@ -785,8 +807,30 @@ fn resolve_all_of_fields(
                 // If we have an all_fields entry that is of type serde_json::Value, then we should replace it.
                 for field in fields {
                     if let Some(existing_field) = all_fields.get_mut(&field.name) {
+                        // Value
                         if existing_field.field_type == "serde_json::Value" {
                             *existing_field = field;
+                        } else if existing_field.field_type == "Option<serde_json::Value>" {
+                            existing_field.field_type = format!("Option<{}>", field.field_type);
+                        // HashMap Value
+                        } else if existing_field.field_type
+                            == "std::collections::HashMap<String, serde_json::Value>"
+                        {
+                            existing_field.field_type =
+                                format!("std::collections::HashMap<String, {}>", field.field_type);
+                        } else if existing_field.field_type
+                            == "Option<std::collections::HashMap<String, serde_json::Value>>"
+                        {
+                            existing_field.field_type = format!(
+                                "Option<std::collections::HashMap<String, {}>>",
+                                field.field_type
+                            );
+                        // Vec Value
+                        } else if existing_field.field_type == "Vec<serde_json::Value>" {
+                            existing_field.field_type = format!("Vec<{}>", field.field_type);
+                        } else if existing_field.field_type == "Option<Vec<serde_json::Value>>" {
+                            existing_field.field_type =
+                                format!("Option<Vec<{}>>", field.field_type);
                         }
                     } else {
                         all_fields.insert(field.name.clone(), field);
