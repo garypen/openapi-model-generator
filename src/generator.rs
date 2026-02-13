@@ -8,6 +8,14 @@ use crate::{
     Result,
 };
 
+bitflags::bitflags! {
+    struct RequiredUses: u8 {
+        const UUID = 0b00000001;
+        const DATETIME = 0b00000010;
+        const DATE = 0b00000100;
+    }
+}
+
 static HDR: OnceLock<String> = OnceLock::new();
 
 fn create_header() -> String {
@@ -133,17 +141,18 @@ pub fn generate_models(
 ) -> Result<String> {
     // First, generate all model code to determine which imports are needed
     let mut models_code = String::new();
+    let mut required_uses = RequiredUses::empty();
 
     for model_type in models {
         match model_type {
             ModelType::Struct(model) => {
-                models_code.push_str(&generate_model(model)?);
+                models_code.push_str(&generate_model(model, &mut required_uses)?);
             }
             ModelType::Union(union) => {
                 models_code.push_str(&generate_union(union)?);
             }
             ModelType::Composition(comp) => {
-                models_code.push_str(&generate_composition(comp)?);
+                models_code.push_str(&generate_composition(comp, &mut required_uses)?);
             }
             ModelType::Enum(enum_model) => {
                 models_code.push_str(&generate_enum(enum_model)?);
@@ -163,9 +172,9 @@ pub fn generate_models(
     }
 
     // Determine which imports are actually needed
-    let needs_uuid = models_code.contains("Uuid");
-    let needs_datetime = models_code.contains("DateTime<Utc>");
-    let needs_date = models_code.contains("NaiveDate");
+    let needs_uuid = required_uses.contains(RequiredUses::UUID);
+    let needs_datetime = required_uses.contains(RequiredUses::DATETIME);
+    let needs_date = required_uses.contains(RequiredUses::DATE);
 
     // Build final output with only necessary imports
     let mut output = create_header();
@@ -197,7 +206,7 @@ pub fn generate_models(
     Ok(output)
 }
 
-fn generate_model(model: &Model) -> Result<String> {
+fn generate_model(model: &Model, required_uses: &mut RequiredUses) -> Result<String> {
     let mut output = String::new();
 
     output.push_str(&generate_description_docs(
@@ -221,9 +230,18 @@ fn generate_model(model: &Model) -> Result<String> {
             "f64" => "f64",
             "i64" => "i64",
             "bool" => "bool",
-            "DateTime" => "DateTime<Utc>",
-            "Date" => "NaiveDate",
-            "Uuid" => "Uuid",
+            "DateTime" => {
+                *required_uses |= RequiredUses::DATETIME;
+                "DateTime<Utc>"
+            }
+            "Date" => {
+                *required_uses |= RequiredUses::DATE;
+                "NaiveDate"
+            }
+            "Uuid" => {
+                *required_uses |= RequiredUses::UUID;
+                "Uuid"
+            }
             _ => &field.field_type,
         };
 
@@ -342,7 +360,10 @@ fn generate_union(union: &UnionModel) -> Result<String> {
     Ok(output)
 }
 
-fn generate_composition(comp: &CompositionModel) -> Result<String> {
+fn generate_composition(
+    comp: &CompositionModel,
+    required_uses: &mut RequiredUses,
+) -> Result<String> {
     let mut output = String::new();
 
     output.push_str(&format!("/// {} (allOf composition)\n", comp.name));
@@ -361,9 +382,18 @@ fn generate_composition(comp: &CompositionModel) -> Result<String> {
             "f64" => "f64",
             "i64" => "i64",
             "bool" => "bool",
-            "DateTime" => "DateTime<Utc>",
-            "Date" => "NaiveDate",
-            "Uuid" => "Uuid",
+            "DateTime" => {
+                *required_uses |= RequiredUses::DATETIME;
+                "DateTime<Utc>"
+            }
+            "Date" => {
+                *required_uses |= RequiredUses::DATE;
+                "NaiveDate"
+            }
+            "Uuid" => {
+                *required_uses |= RequiredUses::UUID;
+                "Uuid"
+            }
             _ => &field.field_type,
         };
 
